@@ -5,3 +5,4 @@ A repo where I do some unrelated experiments with tiny GPT models. For education
 ## Experiments
 
 - [baby GPT on a trip](/babygpt-trip.ipynb): predict the country of a given capital city
+- [GPT adder](/adder.ipynb): predict the sum of two numbers
