@@ -6,23 +6,29 @@ import torch.nn as nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
+# --- Split config classes ---
+
 
 @dataclass
 class GPTConfig:
     vocab_size: int
-    batch_size: int = 16
     block_size: int = 128
-    max_iters: int = 2000
-    eval_iters: int = 50
-    eval_interval: int = 200
-    learning_rate: float = 3e-4
-    weight_decay: float = 1e-1
     n_embd: int = 128
     n_head: int = 4
     n_layer: int = 4
     dropout: float = 0.2
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     eos_token_id: int = -1
+
+
+@dataclass
+class TrainingConfig:
+    batch_size: int = 16
+    max_iters: int = 2000
+    eval_iters: int = 50
+    eval_interval: int = 200
+    learning_rate: float = 3e-4
+    weight_decay: float = 1e-1
 
 
 class Head(nn.Module):
@@ -33,9 +39,7 @@ class Head(nn.Module):
         self.key = nn.Linear(config.n_embd, head_size, bias=False)
         self.query = nn.Linear(config.n_embd, head_size, bias=False)
         self.value = nn.Linear(config.n_embd, head_size, bias=False)
-        self.register_buffer(
-            "tril", torch.tril(torch.ones(config.block_size, config.block_size))
-        )
+        self.register_buffer("tril", torch.tril(torch.ones(config.block_size, config.block_size)))
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -61,9 +65,7 @@ class MultiHeadAttention(nn.Module):
 
     def __init__(self, head_size, config):
         super().__init__()
-        self.heads = nn.ModuleList(
-            [Head(head_size, config=config) for _ in range(config.n_head)]
-        )
+        self.heads = nn.ModuleList([Head(head_size, config=config) for _ in range(config.n_head)])
         self.proj = nn.Linear(head_size * config.n_head, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -117,8 +119,6 @@ class GPT(nn.Module):
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd)  # final layer norm
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
-
-        # better init, not covered in the original GPT video, but important, will cover in followup video
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -134,9 +134,7 @@ class GPT(nn.Module):
 
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx)  # (B,T,C)
-        pos_emb = self.position_embedding_table(
-            torch.arange(T, device=self.config.device)
-        )  # (T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=self.config.device))  # (T,C)
         x = tok_emb + pos_emb  # (B,T,C)
         x = self.blocks(x)  # (B,T,C)
         x = self.ln_f(x)  # (B,T,C)
@@ -177,29 +175,29 @@ class Trainer:
     def __init__(
         self,
         model: GPT,
-        config: GPTConfig,
+        model_config: GPTConfig,
+        train_config: TrainingConfig,
         checkpoint: str = None,
         tokenizer=None,
         train_data=None,
         val_data=None,
     ):
         self.model = model
-        self.config = config
+        self.model_config = model_config
+        self.train_config = train_config
         self.checkpoint = checkpoint
         self.tokenizer = tokenizer
         self.train_data = train_data
         self.val_data = val_data
-        self.model.to(self.config.device)
+        self.model.to(self.model_config.device)
 
     def get_batch(self, split: str):
         # generate a small batch of data of inputs x and targets y
         data = self.train_data if split == "train" else self.val_data
-        ix = torch.randint(
-            len(data) - self.config.block_size, (self.config.batch_size,)
-        )
-        x = torch.stack([data[i : i + self.config.block_size] for i in ix])
-        y = torch.stack([data[i + 1 : i + self.config.block_size + 1] for i in ix])
-        x, y = x.to(self.config.device), y.to(self.config.device)
+        ix = torch.randint(len(data) - self.model_config.block_size, (self.train_config.batch_size,))
+        x = torch.stack([data[i : i + self.model_config.block_size] for i in ix])
+        y = torch.stack([data[i + 1 : i + self.model_config.block_size + 1] for i in ix])
+        x, y = x.to(self.model_config.device), y.to(self.model_config.device)
         return x, y
 
     @torch.no_grad()
@@ -207,10 +205,8 @@ class Trainer:
         out = {}
         self.model.eval()
         for split in ["train", "val"]:
-            losses = torch.zeros(self.config.eval_iters)
-            for k in tqdm(
-                range(self.config.eval_iters), desc=f"evaluating {split} set"
-            ):
+            losses = torch.zeros(self.train_config.eval_iters)
+            for k in tqdm(range(self.train_config.eval_iters), desc=f"evaluating {split} set"):
                 X, Y = self.get_batch(split=split)
                 logits, loss = self.model(X, Y)
                 losses[k] = loss.item()
@@ -226,31 +222,21 @@ class Trainer:
         print(sum(p.numel() for p in self.model.parameters()) / 1e6, "M parameters")
 
         # create a PyTorch optimizer
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.config.learning_rate
-        )
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.train_config.learning_rate)
 
         train_losses = []
         val_losses = []
 
-        for iter in tqdm(range(self.config.max_iters), desc="training"):
+        for iter in tqdm(range(self.train_config.max_iters), desc="training"):
             # every once in a while evaluate the loss on train and val sets
-            if (
-                iter % self.config.eval_interval == 0
-                or iter == self.config.max_iters - 1
-            ):
+            if iter % self.train_config.eval_interval == 0 or iter == self.train_config.max_iters - 1:
                 losses = self.estimate_loss()
                 train_losses.append(losses["train"])
                 val_losses.append(losses["val"])
-                print(
-                    f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
-                )
+                print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
             # every once in a while save the model to disk
-            if (
-                iter % self.config.eval_interval == 0
-                or iter == self.config.max_iters - 1
-            ):
+            if iter % self.train_config.eval_interval == 0 or iter == self.train_config.max_iters - 1:
                 # create a directory checkpoints if it doesn't exist
                 if not os.path.exists("checkpoints"):
                     os.mkdir("checkpoints")
@@ -258,12 +244,8 @@ class Trainer:
 
                 if self.tokenizer:
                     # generate from the model
-                    context = torch.zeros(
-                        (1, 1), dtype=torch.long, device=self.config.device
-                    )
-                    decoded = self.tokenizer.decode(
-                        self.model.generate(context, max_new_tokens=100)[0].tolist()
-                    )
+                    context = torch.zeros((1, 1), dtype=torch.long, device=self.model_config.device)
+                    decoded = self.tokenizer.decode(self.model.generate(context, max_new_tokens=100)[0].tolist())
                     print(decoded)
 
             # sample a batch of data
@@ -279,18 +261,14 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    config = GPTConfig(
-        vocab_size=20, batch_size=1, block_size=5, n_embd=8, n_head=1, n_layer=1
-    )
-
-    model = GPT(config)
-    model.to(config.device)
-    data = torch.randint(
-        0, config.vocab_size, (config.batch_size, config.block_size + 1)
-    )
+    model_config = GPTConfig(vocab_size=20, block_size=5, n_embd=8, n_head=1, n_layer=1)
+    train_config = TrainingConfig(batch_size=1)
+    model = GPT(model_config)
+    model.to(model_config.device)
+    data = torch.randint(0, model_config.vocab_size, (train_config.batch_size, model_config.block_size + 1))
     x = data[:, :-1]
     y = data[:, 1:]
-    x, y = x.to(config.device), y.to(config.device)
+    x, y = x.to(model_config.device), y.to(model_config.device)
     print(data)
     print(x)
     print(y)
